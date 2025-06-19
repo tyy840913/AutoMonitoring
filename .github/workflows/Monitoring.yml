@@ -3,7 +3,7 @@ name: Multi-Repo Update Checker (Including Pre-releases)
 on:
   # 每小时的第0分钟运行一次
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 6-23 * * *'
   # 允许手动触发
   workflow_dispatch:
 
