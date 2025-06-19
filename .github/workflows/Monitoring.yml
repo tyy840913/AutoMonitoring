@@ -1,0 +1,121 @@
+name: Multi-Repo Update Checker (Including Pre-releases)
+
+on:
+  # 每小时的第0分钟运行一次
+  schedule:
+    - cron: '0 * * * *'
+  # 允许手动触发
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  check_for_updates:
+    runs-on: ubuntu-latest
+    strategy:
+      # 为了避免一个仓库的失败影响其他仓库，设置 fail-fast: false
+      fail-fast: false
+      matrix:
+        repo:
+          - 'bia-pain-bache/BPB-Worker-Panel'
+          
+          # --- 在这里添加更多你想要监控的仓库，格式为 'owner/repo-name' ---
+
+    steps:
+      - name: 1. 初始化仓库
+        uses: actions/checkout@v4
+
+      - name: 2. 准备版本文件路径
+        id: paths
+        run: |
+          mkdir -p _versions
+          VERSION_FILE="_versions/$(echo ${{ matrix.repo }} | tr '/' '-').version"
+          echo "VERSION_FILE=${VERSION_FILE}" >> $GITHUB_ENV
+          echo "Checking repo: ${{ matrix.repo }}"
+          echo "Version file will be: ${VERSION_FILE}"
+
+      - name: 3. 获取本地记录的最新版本
+        id: get_local_version
+        run: |
+          if [ -f "${{ env.VERSION_FILE }}" ]; then
+            LOCAL_VERSION=$(cat "${{ env.VERSION_FILE }}")
+            echo "本地记录的版本 (${{ matrix.repo }}): ${LOCAL_VERSION}"
+          else
+            LOCAL_VERSION="<none>"
+            echo "首次检查 (${{ matrix.repo }}), 无本地版本记录。"
+          fi
+          echo "LOCAL_VERSION=${LOCAL_VERSION}" >> $GITHUB_ENV
+
+      - name: 4. 从 GitHub API 获取远程最新发布版本
+        id: get_remote_version
+        run: |
+          # --- 核心修改点 START ---
+          # 使用 /releases API 获取所有版本的列表
+          API_URL="https://api.github.com/repos/${{ matrix.repo }}/releases"
+          
+          # 获取包含所有 release 的 JSON 数组，然后用 jq 取第一个元素
+          RESPONSE=$(curl -fsL --header "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "$API_URL" | jq '.[0]')
+          # --- 核心修改点 END ---
+
+          # 如果 RESPONSE 是 null 或空字符串，说明仓库可能没有任何 release
+          if [ -z "$RESPONSE" ] || [ "$RESPONSE" == "null" ]; then
+            echo "无法获取仓库 ${{ matrix.repo }} 的任何 Release 信息。可能该仓库从未发布过。"
+            echo "REMOTE_VERSION=FETCH_FAILED" >> $GITHUB_ENV
+            exit 0
+          fi
+
+          REMOTE_VERSION=$(echo "$RESPONSE" | jq -r '.tag_name')
+          RELEASE_URL=$(echo "$RESPONSE" | jq -r '.html_url')
+          # 检查是否为预发布版，用于通知
+          IS_PRERELEASE=$(echo "$RESPONSE" | jq -r '.prerelease')
+
+          echo "远程最新发布版本 (${{ matrix.repo }}): ${REMOTE_VERSION} (Prerelease: ${IS_PRERELEASE})"
+          echo "REMOTE_VERSION=${REMOTE_VERSION}" >> $GITHUB_ENV
+          echo "RELEASE_URL=${RELEASE_URL}" >> $GITHUB_ENV
+          echo "IS_PRERELEASE=${IS_PRERELEASE}" >> $GITHUB_ENV
+
+
+      - name: 5. 比较版本并决定是否通知
+        id: check_if_updated
+        if: steps.get_remote_version.outputs.REMOTE_VERSION != 'FETCH_FAILED'
+        run: |
+          if [ "${{ env.LOCAL_VERSION }}" != "${{ env.REMOTE_VERSION }}" ]; then
+            echo "发现新版本! (${{ matrix.repo }}) 从 ${{ env.LOCAL_VERSION }} -> ${{ env.REMOTE_VERSION }}"
+            echo "UPDATE_FOUND=true" >> $GITHUB_ENV
+          else
+            echo "版本未更新 (${{ matrix.repo }}), 无需操作。"
+            echo "UPDATE_FOUND=false" >> $GITHUB_ENV
+          fi
+
+      - name: 6. 发送 Telegram 通知
+        if: env.UPDATE_FOUND == 'true'
+        uses: appleboy/telegram-action@master
+        with:
+          to: ${{ secrets.TELEGRAM_CHAT_ID }}
+          token: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          format: markdown
+          message: |
+            📢 *仓库更新提醒*
+            ${{ env.IS_PRERELEASE == 'true' && '**(这是一个预发布版本!)**' || '' }}
+
+            *仓库:* `${{ matrix.repo }}`
+            *旧版本:* `${{ env.LOCAL_VERSION }}`
+            *新版本:* `${{ env.REMOTE_VERSION }}`
+
+            👇 *点击查看新版本详情:*
+            [${{ env.REMOTE_VERSION }} Release Notes](${{ env.RELEASE_URL }})
+
+      - name: 7. 更新本地版本记录文件
+        if: env.UPDATE_FOUND == 'true'
+        run: |
+          echo "正在更新版本文件: ${{ env.VERSION_FILE }}"
+          echo "${{ env.REMOTE_VERSION }}" > "${{ env.VERSION_FILE }}"
+
+      - name: 8. 提交版本文件变更
+        if: env.UPDATE_FOUND == 'true'
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "ci: 更新 ${{ matrix.repo }} 版本记录至 ${{ env.REMOTE_VERSION }}"
+          file_pattern: ${{ env.VERSION_FILE }}
+          commit_author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
