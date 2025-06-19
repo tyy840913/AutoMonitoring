@@ -19,6 +19,7 @@ jobs:
       matrix:
         repo:
           - 'bia-pain-bache/BPB-Worker-Panel'
+          - 'KaringX/karing'
           
           # --- 在这里添加更多你想要监控的仓库，格式为 'owner/repo-name' ---
 
